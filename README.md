@@ -1483,4 +1483,311 @@ apt-get update
 apt-get install yandex-browser-stable
 ```
 
+
+
+Проверка
+
+1. Базовые настройки и сетевая доступность
+
+На всех устройствах (ISP, HQ-RTR, BR-RTR, HQ-SRV, HQ-CLI, BR-SRV):
+
+```bash
+hostname
+ip -c a
+timedatectl status
+```
+
+Дополнительные проверки:
+
+· ISP (проверка шлюза и интерфейсов):
+  ```bash
+  ping -c 2 8.8.8.8
+  cat /etc/network/interfaces
+  ```
+· HQ-RTR, BR-RTR (проверка VLAN и маршрутов):
+  ```bash
+  cat /etc/network/interfaces
+  ip -br link show
+  ip route show
+  ```
+· HQ-CLI (проверка получения IP по DHCP):
+  ```bash
+  # Проверьте, что интерфейс получил адрес из диапазона 192.168.2.0/28
+  ip a show dev enp0s3.200
+  ```
+· BR-SRV (проверка статического IP):
+  ```bash
+  # Убедитесь, что IP 192.168.4.2/27 прописан
+  cat /etc/net/ifaces/enp0s3/ipv4address
+  cat /etc/net/ifaces/enp0s3/ipv4route
+  ```
+
+2. Проверка IP-форвардинга (маршрутизации)
+
+На ISP, HQ-RTR, BR-RTR:
+
+```bash
+sysctl net.ipv4.ip_forward
+# Должно быть: net.ipv4.ip_forward = 1
+```
+
+3. Проверка правил NAT (маскарадинга)
+
+На ISP:
+
+```bash
+iptables -t nat -L POSTROUTING -v -n
+# Должны быть правила MASQUERADE для eth0 с исходными сетями 172.16.4.0/28 и 172.16.5.0/28
+```
+
+На HQ-RTR:
+
+```bash
+iptables -t nat -L POSTROUTING -v -n
+# Должны быть правила MASQUERADE для eth0 с исходными сетями 192.168.1.0/26, 192.168.2.0/28, 192.168.3.0/29
+```
+
+На BR-RTR:
+
+```bash
+iptables -t nat -L POSTROUTING -v -n
+# Должно быть правило MASQUERADE для eth0 с исходной сетью 192.168.4.0/27
+```
+
+4. Проверка GRE-туннеля и OSPF
+
+На HQ-RTR и BR-RTR:
+
+```bash
+# 1. Проверьте интерфейс туннеля
+ip a show gre1
+# Должен быть поднят с IP 10.10.10.1 (HQ) и 10.10.10.2 (BR)
+
+# 2. Проверьте доступность соседа через туннель
+ping -c 2 10.10.10.1 # На BR-RTR
+ping -c 2 10.10.10.2 # На HQ-RTR
+
+# 3. Проверьте статус OSPF соседа (выполняется в режиме vtysh)
+vtysh -c "show ip ospf neighbor"
+# Должен отображаться сосед в состоянии Full
+
+# 4. Проверьте маршруты OSPF
+vtysh -c "show ip route ospf"
+# На HQ-RTR должен быть маршрут к сети 192.168.4.0/27 через 10.10.10.2
+# На BR-RTR должны быть маршруты к сетям 192.168.1.0/26, 192.168.2.0/28, 192.168.3.0/29 через 10.10.10.1
+```
+
+5. Проверка сквозной связности между HQ и BR
+
+На HQ-SRV или HQ-CLI:
+
+```bash
+ping -c 3 192.168.4.2
+traceroute 192.168.4.2
+# Трассировка должна проходить через 192.168.1.1 (HQ-RTR), затем 10.10.10.2 (BR-RTR)
+```
+
+6. Проверка DHCP (сервер на HQ-RTR, клиент HQ-CLI)
+
+На HQ-RTR (сервер):
+
+```bash
+systemctl status dnsmasq
+cat /etc/dnsmasq.conf | grep -v "^#" | grep -v "^$"
+```
+
+На HQ-CLI (клиент):
+
+```bash
+# Убедитесь, что получили IP, шлюз и DNS
+ip a show dev enp0s3.200
+ip route show default
+cat /etc/resolv.conf
+```
+
+7. Проверка DNS (сервер на HQ-SRV)
+
+На HQ-SRV:
+
+```bash
+systemctl status dnsmasq
+# Проверьте разрешение имен локально
+nslookup hq-rtr.au-team.irpo 127.0.0.1
+nslookup moodle.au-team.irpo 127.0.0.1
+nslookup wiki.au-team.irpo 127.0.0.1
+nslookup br-srv.au-team.irpo 127.0.0.1
+```
+
+На HQ-CLI:
+
+```bash
+# DNS должен указывать на HQ-SRV (192.168.1.2) или HQ-RTR (192.168.2.1), который перенаправляет на HQ-SRV
+cat /etc/resolv.conf
+nslookup google.com
+nslookup hq-srv.au-team.irpo
+```
+
+8. Проверка доменных служб (Samba AD на BR-SRV)
+
+На BR-SRV:
+
+```bash
+# Проверьте статус служб Samba
+systemctl status samba
+
+# Проверьте информацию о домене
+samba-tool domain info 127.0.0.1
+
+# Проверьте наличие пользователей
+samba-tool user list
+
+# Проверьте наличие группы hq и её членов
+samba-tool group list | grep hq
+samba-tool group listmembers hq
+```
+
+На HQ-CLI:
+
+```bash
+# Проверьте, что компьютер присоединен к домену (должна быть доменная учетная запись в выводе)
+realm list
+
+# Проверьте работу sudo для доменного пользователя (например, user1.hq)
+sudo -l -U user1.hq
+# Должны отобразиться разрешенные команды (/bin/cat, /bin/grep, /usr/bin/id)
+```
+
+9. Проверка RAID, NFS и Chrony
+
+На HQ-SRV:
+
+```bash
+# 1. Проверка RAID
+cat /proc/mdstat
+mdadm --detail /dev/md0
+
+# 2. Проверка монтирования и экспорта NFS
+df -h | grep raid5
+exportfs -v
+
+# 3. Проверка времени
+timedatectl timesync-status
+# Источник должен быть 192.168.1.1 (HQ-RTR)
+```
+
+На HQ-CLI:
+
+```bash
+# Проверка монтирования NFS
+mount -v | grep nfs
+# Попробуйте создать файл в точке монтирования
+touch /mnt/nfs/test_from_hq_cli
+ls -l /mnt/nfs/
+```
+
+На BR-SRV:
+
+```bash
+# Проверьте, виден ли файл, созданный с HQ-CLI
+ls -l /raid5/nfs/
+```
+
+10. Проверка Ansible
+
+На BR-SRV (Ansible Control Node):
+
+```bash
+ansible all -m ping
+# Все хосты должны ответить "pong"
+```
+
+11. Проверка Docker (Wiki на BR-SRV)
+
+На BR-SRV:
+
+```bash
+# 1. Проверьте статус Docker и контейнеров
+systemctl status docker
+docker ps
+# Должны работать контейнеры "wiki" и "mariadb"
+
+# 2. Проверьте доступность Wiki на локальном порту
+curl -I http://localhost:8080
+```
+
+Проверка с HQ-CLI через браузер:
+
+· Откройте http://wiki.au-team.irpo (через прокси на HQ-RTR)
+· Откройте http://192.168.4.2:8080 (прямой доступ)
+
+12. Проверка Moodle на HQ-SRV
+
+На HQ-SRV:
+
+```bash
+# Проверьте работу веб-сервера и PHP
+systemctl status httpd2
+systemctl status mysqld
+curl -I http://localhost
+```
+
+Проверка с HQ-CLI через браузер:
+
+· Откройте http://moodle.au-team.irpo (через прокси на HQ-RTR)
+· Откройте http://192.168.1.2 (прямой доступ)
+
+13. Проверка обратного прокси (Nginx на HQ-RTR)
+
+На HQ-RTR:
+
+```bash
+systemctl status nginx
+curl -H "Host: moodle.au-team.irpo" http://127.0.0.1
+curl -H "Host: wiki.au-team.irpo" http://127.0.0.1
+```
+
+14. Проверка проброса портов (Port Forwarding)
+
+На BR-RTR:
+
+```bash
+iptables -t nat -L PREROUTING -v -n
+# Должны быть правила DNAT с 192.168.4.1:80 -> 192.168.4.2:8080 и :2024 -> :2024
+```
+
+На HQ-RTR:
+
+```bash
+iptables -t nat -L PREROUTING -v -n
+# Должно быть правило DNAT с 192.168.1.1:2024 -> 192.168.1.2:2024
+```
+
+Проверка с HQ-CLI:
+
+```bash
+# SSH подключение через проброс портов на маршрутизаторах
+ssh -p 2024 sshuser@192.168.4.1 # Должно подключиться к BR-SRV
+ssh -p 2024 sshuser@192.168.1.1 # Должно подключиться к HQ-SRV
+```
+
+Итоговая комплексная проверка (можно выполнить с HQ-CLI):
+
+```bash
+# 1. Проверка DNS
+nslookup moodle.au-team.irpo
+nslookup wiki.au-team.irpo
+nslookup google.com
+
+# 2. Проверка доступа к веб-сервисам через доменные имена (через прокси)
+curl -I http://moodle.au-team.irpo
+curl -I http://wiki.au-team.irpo
+
+# 3. Проверка доступа к узлам в филиале
+ping -c 2 br-srv.au-team.irpo
+ping -c 2 192.168.4.2
+
+# 4. Проверка аутентификации в домене (если присоединены)
+id user1.hq
+```
+
 The end!
